@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # MinIO Service
+  minio:
+    image: minio/minio
+    container_name: minio
+    environment:
+      MINIO_ACCESS_KEY: minioadmin  # Custom access key
+      MINIO_SECRET_KEY: minioadmin  # Custom secret key
+    volumes:
+      - ./minio-data:/root/data/minio           # Local directory to store MinIO data
+    ports:
+      - "9000:9000"                  # MinIO server port
+      - "9001:9001"                  # MinIO console port
+    command: server /data --console-address ":9001"
+
+  # RabbitMQ Service
+  rabbitmq:
+    image: rabbitmq:3-management     # RabbitMQ with management console
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"                  # RabbitMQ server port
+      - "15672:15672"                # RabbitMQ management console port
+    environment:
+      RABBITMQ_DEFAULT_USER: guest   # RabbitMQ username
+      RABBITMQ_DEFAULT_PASS: guest   # RabbitMQ password
