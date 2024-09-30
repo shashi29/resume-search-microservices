@@ -7,3 +7,4 @@ BUCKET_NAME = "documents"  # Bucket name for storing documents
 
 RABBITMQ_HOST = "localhost"  # Change if running RabbitMQ in a different environment
 RABBITMQ_QUEUE = "documents_queue"
+METADATA_SERVICE_URL = "http://localhost:8082"

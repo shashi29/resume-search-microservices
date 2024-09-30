@@ -6,6 +6,9 @@ from minio import Minio
 from minio.error import S3Error
 import pika
 import os
+import requests
+from datetime import datetime
+from uuid import uuid4
 from config import (
     MINIO_ENDPOINT,
     MINIO_ACCESS_KEY,
@@ -13,6 +16,7 @@ from config import (
     RABBITMQ_HOST,
     RABBITMQ_QUEUE,
     BUCKET_NAME,
+    METADATA_SERVICE_URL 
 )
 
 app = FastAPI()
@@ -40,9 +44,27 @@ def publish_message(message: str):
     channel.basic_publish(exchange="", routing_key=RABBITMQ_QUEUE, body=message)
     connection.close()
 
+def save_metadata_to_service(document_id: str, filename: str):
+    # Prepare metadata
+    metadata = {
+        "title": filename,
+        "author": "Unknown",  # This could be passed or derived from the document
+        "creation_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
+        "file_type": filename.split('.')[-1],  # Get the file extension
+        "document_id": document_id
+    }
+
+    # Send metadata to Metadata Service
+    try:
+        response = requests.post(f"{METADATA_SERVICE_URL}/metadata/", json=metadata)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save metadata: {str(e)}")
+
 @app.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     object_name = file.filename
+    document_id = str(uuid4())  # Generate a unique document ID
     
     try:
         # Create a temporary file
@@ -55,6 +77,9 @@ async def upload_document(file: UploadFile = File(...)):
         
         # Remove the temporary file
         os.remove(file.filename)
+        
+        # Save metadata to Metadata Service
+        save_metadata_to_service(document_id, object_name)
         
         # Publish message to RabbitMQ
         publish_message(f'Document {object_name} uploaded to bucket {BUCKET_NAME}.')
@@ -78,19 +103,39 @@ async def get_document(filename: str):
     except S3Error as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+def delete_metadata_from_service(document_id: str):
+    """Function to delete metadata from Metadata Service"""
+    try:
+        response = requests.delete(f"{METADATA_SERVICE_URL}/metadata/{document_id}")
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete metadata: {str(e)}")
+
 @app.delete("/documents/{filename}")
 async def delete_document(filename: str):
     try:
         # Check if the document exists before deleting
         minio_client.stat_object(BUCKET_NAME, filename)
+
+        # Remove the document from MinIO
         minio_client.remove_object(BUCKET_NAME, filename)
+
+        # Generate document ID (assumed to be the filename or derived from it)
+        document_id = filename  # You might have a different way of storing document IDs
+
+        # Delete the corresponding metadata from the Metadata Service
+        delete_metadata_from_service(document_id)
 
         # Publish message to RabbitMQ
         publish_message(f'Document {filename} deleted from bucket {BUCKET_NAME}.')
 
         return JSONResponse(content={"message": f"Document {filename} deleted successfully."}, status_code=200)
+
     except S3Error as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/documents")
 async def list_documents():
