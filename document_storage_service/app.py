@@ -1,9 +1,14 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.security import OAuth2PasswordBearer
+from fastapi.middleware.cors import CORSMiddleware
 import os
-import sys
+import tempfile
+import logging
+import time
+import uuid
 from uuid import uuid4
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import (
     MINIO_ENDPOINT,
     MINIO_ACCESS_KEY,
@@ -13,11 +18,27 @@ from config import (
     BUCKET_NAME
 )
 
-# Now import your utility classes
+# Import your utility classes
 from minio_utils import MinioClient
 from rabbitmq_utils import RabbitMQClient
 
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Adjust for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Security
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 # Initialize MinIO and RabbitMQ clients
 minio_client = MinioClient(
@@ -37,40 +58,42 @@ try:
     minio_client.client.make_bucket(BUCKET_NAME)
 except Exception as e:
     if "BucketAlreadyOwnedByYou" not in str(e):
+        logger.error(f"Error creating bucket: {e}")
         raise
 
 @app.post("/upload")
-async def upload_document(file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
+async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
     object_name = file.filename
+    idempotency_key = str(uuid4())  # Generate an idempotency key
+    logger.info(f"Processing upload for: {object_name} with idempotency key: {idempotency_key}")
+
     try:
         # Create a temporary file
-        with open(file.filename, "wb") as temp_file:
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             content = await file.read()
             temp_file.write(content)
+            temp_file.flush()  # Ensure all data is written
+            temp_file.seek(0)  # Move to the beginning of the file
 
-        # Upload file to MinIO
-        minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=object_name, file_path=file.filename)
+            # Upload file to MinIO
+            minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=object_name, file_path=temp_file.name)
 
-        # Remove the temporary file
-        os.remove(file.filename)
-
-        # Publish message to RabbitMQ with detailed information
+        # Publish message to RabbitMQ in the background
         message = {
             "operation": "upload",
             "document_name": object_name,
             "minio_path": f"{BUCKET_NAME}/{object_name}",
             "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            "user": user
+            "user": user,
+            "idempotency_key": idempotency_key
         }
-        rabbitmq_client.send_message(message)
+        background_tasks.add_task(rabbitmq_client.send_message, message)
 
         return JSONResponse(content={"message": f"File {object_name} uploaded successfully."}, status_code=201)
 
     except Exception as e:
-        # If temporary file exists, remove it
-        if os.path.exists(file.filename):
-            os.remove(file.filename)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error during upload: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while uploading the document.")
 
 @app.get("/documents/{filename}")
 async def get_document(filename: str):
@@ -78,13 +101,14 @@ async def get_document(filename: str):
         # Check if the document exists
         minio_client.client.stat_object(BUCKET_NAME, filename)
         # Get the document URL (This is a presigned URL for temporary access)
-        url = minio_client.client.presigned_get_object(BUCKET_NAME, filename)
+        url = minio_client.client.presigned_get_object(BUCKET_NAME, filename, expires=timedelta(minutes=10))
         return {"url": url}
     except Exception as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        logger.error(f"Error fetching document: {e}")
+        raise HTTPException(status_code=404, detail=f"Document {filename} not found.")
 
 @app.delete("/documents/{filename}")
-async def delete_document(filename: str, user: str = Depends(lambda: "Anonymous")):
+async def delete_document(background_tasks: BackgroundTasks, filename: str, user: str = Depends(lambda: "Anonymous")):
     try:
         # Check if the document exists before deleting
         minio_client.client.stat_object(BUCKET_NAME, filename)
@@ -92,7 +116,7 @@ async def delete_document(filename: str, user: str = Depends(lambda: "Anonymous"
         # Remove the document from MinIO
         minio_client.client.remove_object(BUCKET_NAME, filename)
 
-        # Publish message to RabbitMQ with detailed information
+        # Publish message to RabbitMQ in the background
         message = {
             "operation": "delete",
             "document_name": filename,
@@ -100,12 +124,13 @@ async def delete_document(filename: str, user: str = Depends(lambda: "Anonymous"
             "deleted_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             "user": user
         }
-        rabbitmq_client.send_message(message)
+        background_tasks.add_task(rabbitmq_client.send_message, message)
 
         return JSONResponse(content={"message": f"Document {filename} deleted successfully."}, status_code=200)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error during deletion: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while deleting the document.")
 
 @app.get("/documents")
 async def list_documents():
@@ -114,15 +139,22 @@ async def list_documents():
         file_list = minio_client.list_objects(bucket_name=BUCKET_NAME)
         return {"documents": file_list}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error listing documents: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while listing documents.")
 
 @app.put("/documents/{filename}")
-async def update_document(filename: str, file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
+async def update_document(background_tasks: BackgroundTasks, filename: str, file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
     try:
         # Overwrite the existing document
-        minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=filename, file_path=file.filename)
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            content = await file.read()
+            temp_file.write(content)
+            temp_file.flush()  # Ensure all data is written
+            temp_file.seek(0)  # Move to the beginning of the file
 
-        # Publish message to RabbitMQ with detailed information
+            minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=filename, file_path=temp_file.name)
+
+        # Publish message to RabbitMQ in the background
         message = {
             "operation": "update",
             "document_name": filename,
@@ -130,11 +162,21 @@ async def update_document(filename: str, file: UploadFile = File(...), user: str
             "updated_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             "user": user
         }
-        rabbitmq_client.send_message(message)
+        background_tasks.add_task(rabbitmq_client.send_message, message)
 
         return JSONResponse(content={"message": f"Document {filename} updated successfully."}, status_code=200)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Error during update: {e}")
+        raise HTTPException(status_code=500, detail="An error occurred while updating the document.")
+
+@app.get("/health")
+async def health_check():
+    minio_status = minio_client.check_health()
+    rabbitmq_status = rabbitmq_client.check_health()
+    return JSONResponse(content={
+        "minio": "healthy" if minio_status else "unhealthy",
+        "rabbitmq": "healthy" if rabbitmq_status else "unhealthy"
+    })
 
 if __name__ == '__main__':
     import uvicorn

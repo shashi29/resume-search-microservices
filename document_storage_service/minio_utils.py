@@ -38,3 +38,12 @@ class MinioClient:
         except S3Error as e:
             logger.error(f"Error listing objects: {e}")
             return []
+        
+    def check_health(self):
+        try:
+            # Check if the client can list buckets
+            buckets = self.client.list_buckets()
+            return True  # If successful, the service is healthy
+        except S3Error as e:
+            print(f"MinIO health check failed: {e}")
+            return False

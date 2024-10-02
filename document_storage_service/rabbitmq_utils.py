@@ -44,3 +44,15 @@ class RabbitMQClient:
                 channel.start_consuming()
         except Exception as e:
             logger.error(f"Error in consumer: {e}")
+
+    def check_health(self):
+        try:
+            # Try to create a connection and declare the queue
+            connection = pika.BlockingConnection(pika.ConnectionParameters(host=self.host))
+            channel = connection.channel()
+            channel.queue_declare(queue=self.queue, passive=True)  # Check if the queue exists
+            connection.close()
+            return True  # If successful, the service is healthy
+        except Exception as e:
+            print(f"RabbitMQ health check failed: {e}")
+            return False
