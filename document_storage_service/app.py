@@ -82,7 +82,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
         message = {
             "operation": "upload",
             "document_name": object_name,
-            "minio_path": f"{BUCKET_NAME}/{object_name}",
+            "minio_path": f"{object_name}",
             "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
             "user": user,
             "idempotency_key": idempotency_key
