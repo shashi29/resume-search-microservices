@@ -63,9 +63,11 @@ except Exception as e:
 
 @app.post("/upload")
 async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
-    object_name = file.filename
+    original_filename = file.filename
     idempotency_key = str(uuid4())  # Generate an idempotency key
-    logger.info(f"Processing upload for: {object_name} with idempotency key: {idempotency_key}")
+    file_extension = os.path.splitext(original_filename)[1]
+    object_name = f"{idempotency_key}{file_extension}"
+    logger.info(f"Processing upload for: {original_filename} with idempotency key: {idempotency_key}")
 
     try:
         # Create a temporary file
@@ -75,12 +77,13 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
             temp_file.flush()  # Ensure all data is written
             temp_file.seek(0)  # Move to the beginning of the file
 
-            # Upload file to MinIO
+            # Upload file to MinIO using idempotency_key as the filename
             minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=object_name, file_path=temp_file.name)
 
         # Publish message to RabbitMQ in the background
         message = {
             "operation": "upload",
+            "original_filename": original_filename,
             "document_name": object_name,
             "minio_path": f"{object_name}",
             "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
@@ -89,7 +92,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
         }
         background_tasks.add_task(rabbitmq_client.send_message, message)
 
-        return JSONResponse(content={"message": f"File {object_name} uploaded successfully."}, status_code=201)
+        return JSONResponse(content={"message": f"File {original_filename} uploaded successfully as {object_name}."}, status_code=201)
 
     except Exception as e:
         logger.error(f"Error during upload: {e}")
@@ -145,26 +148,36 @@ async def list_documents():
 @app.put("/documents/{filename}")
 async def update_document(background_tasks: BackgroundTasks, filename: str, file: UploadFile = File(...), user: str = Depends(lambda: "Anonymous")):
     try:
-        # Overwrite the existing document
+        # Generate a new idempotency key for the update
+        idempotency_key = str(uuid4())
+        file_extension = os.path.splitext(filename)[1]
+        new_object_name = f"{idempotency_key}{file_extension}"
+
+        # Upload the new version with the new idempotency key
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             content = await file.read()
             temp_file.write(content)
             temp_file.flush()  # Ensure all data is written
             temp_file.seek(0)  # Move to the beginning of the file
 
-            minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=filename, file_path=temp_file.name)
+            minio_client.upload_file(bucket_name=BUCKET_NAME, object_name=new_object_name, file_path=temp_file.name)
+
+        # Remove the old version
+        minio_client.client.remove_object(BUCKET_NAME, filename)
 
         # Publish message to RabbitMQ in the background
         message = {
             "operation": "update",
-            "document_name": filename,
-            "minio_path": f"{BUCKET_NAME}/{filename}",
+            "original_filename": filename,
+            "document_name": new_object_name,
+            "minio_path": f"{BUCKET_NAME}/{new_object_name}",
             "updated_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            "user": user
+            "user": user,
+            "idempotency_key": idempotency_key
         }
         background_tasks.add_task(rabbitmq_client.send_message, message)
 
-        return JSONResponse(content={"message": f"Document {filename} updated successfully."}, status_code=200)
+        return JSONResponse(content={"message": f"Document {filename} updated successfully as {new_object_name}."}, status_code=200)
     except Exception as e:
         logger.error(f"Error during update: {e}")
         raise HTTPException(status_code=500, detail="An error occurred while updating the document.")
