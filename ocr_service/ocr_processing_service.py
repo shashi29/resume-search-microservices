@@ -48,10 +48,8 @@ class OCRProcessingService:
             document_name = message['document_name']
             minio_path = message['minio_path']
             idempotency_key = message.get('idempotency_key')
-
-            if not idempotency_key:
-                idempotency_key = str(uuid.uuid4())
-                logger.warning(f"Idempotency key not provided. Generated new key: {idempotency_key}")
+            original_filename = message.get('original_filename')
+            
 
             # Download the document from MinIO
             local_path = f"/tmp/{document_name}"
@@ -79,11 +77,12 @@ class OCRProcessingService:
 
             # Prepare result message
             result_message = {
-                "document_name": document_name,
+                "operation": "ocr",
+                "original_filename": original_filename,
+                "document_name": result_filename,
                 "minio_path": result_path,
-                "processed_date": datetime.now().isoformat(),
-                "idempotency_key": idempotency_key,
-                "user": message.get('user', 'Anonymous')
+                "idempotency_key":idempotency_key,
+                "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             }
 
             # Publish result to output queue

@@ -66,7 +66,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     original_filename = file.filename
     idempotency_key = str(uuid4())  # Generate an idempotency key
     file_extension = os.path.splitext(original_filename)[1]
-    object_name = f"{idempotency_key}{file_extension}"
+    object_name = f"docs/{idempotency_key}{file_extension}"
     logger.info(f"Processing upload for: {original_filename} with idempotency key: {idempotency_key}")
 
     try:
@@ -84,11 +84,10 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
         message = {
             "operation": "upload",
             "original_filename": original_filename,
-            "document_name": object_name,
+            "document_name": f"{idempotency_key}{file_extension}",
             "minio_path": f"{object_name}",
-            "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S'),
-            "user": user,
-            "idempotency_key": idempotency_key
+            "idempotency_key":idempotency_key,
+            "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         }
         background_tasks.add_task(rabbitmq_client.send_message, message)
 
