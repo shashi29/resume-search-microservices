@@ -33,6 +33,17 @@ class OCRProcessingService:
         self.input_queue = RabbitMQClient(RABBITMQ_HOST, INPUT_QUEUE)
         self.output_queue = RabbitMQClient(RABBITMQ_HOST, OUTPUT_QUEUE)
         self.minio_client = MinioClient(MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=False)
+        self.status_queue = RabbitMQClient(RABBITMQ_HOST, "status_queue")  # Assuming a separate status queue
+
+    def send_status(self, idempotency_key, status, details):
+        """Send status update to the status queue."""
+        status_message = {
+            "id": idempotency_key,
+            "status": status,
+            "details": details,
+            "timestamp": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        self.status_queue.send_message(status_message)
 
     def start(self):
         logger.info(f"Starting OCR Processing Service")
@@ -41,15 +52,21 @@ class OCRProcessingService:
     def process_message(self, message: Dict):
         local_path = None
         result_path = None
+        idempotency_key = message.get('idempotency_key', str(uuid.uuid4()))  # Fallback to a new key if not present
         try:
             logger.info(f"Processing message: {message}")
+            
+            # Send "STARTED" status
+            self.send_status(idempotency_key, "STARTED", {
+                "operation": "ocr",
+                "document_name": message.get('document_name'),
+                "user": message.get('user', 'unknown')
+            })
 
             # Extract document information
             document_name = message['document_name']
             minio_path = message['minio_path']
-            idempotency_key = message.get('idempotency_key')
             original_filename = message.get('original_filename')
-            
 
             # Download the document from MinIO
             local_path = f"/tmp/{document_name}"
@@ -64,7 +81,7 @@ class OCRProcessingService:
             # Save OCR results to MinIO
             result_filename = f"{idempotency_key}.txt"
             result_path = f"ocr_results/{result_filename}"
-            
+
             # Check if the result already exists
             existing_objects = self.minio_client.list_objects(MINIO_BUCKET, prefix=result_path)
             if existing_objects:
@@ -81,7 +98,7 @@ class OCRProcessingService:
                 "original_filename": original_filename,
                 "document_name": result_filename,
                 "minio_path": result_path,
-                "idempotency_key":idempotency_key,
+                "idempotency_key": idempotency_key,
                 "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             }
 
@@ -92,8 +109,21 @@ class OCRProcessingService:
             logger.info(f"OCR results saved to: {result_path}")
             logger.info(f"Result message sent to queue: {OUTPUT_QUEUE}")
 
+            # Send "COMPLETED" status
+            self.send_status(idempotency_key, "COMPLETED", {
+                "operation": "ocr",
+                "document_name": result_filename,
+                "minio_path": result_path
+            })
+
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
+            # Send "ERROR" status
+            self.send_status(idempotency_key, "ERROR", {
+                "operation": "ocr",
+                "document_name": message.get('document_name'),
+                "error": str(e)
+            })
 
         finally:
             # Clean up temporary files
@@ -106,6 +136,7 @@ class OCRProcessingService:
         rabbitmq_health = self.input_queue.check_health() and self.output_queue.check_health()
         minio_health = self.minio_client.check_health()
         return rabbitmq_health and minio_health
+
 
 def main():
     ocr_service = OCRProcessingService()

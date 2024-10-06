@@ -36,6 +36,17 @@ class EmbeddingProcessingService:
         self.output_queue = RabbitMQClient(RABBITMQ_HOST, OUTPUT_QUEUE)
         self.minio_client = MinioClient(MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=False)
         self.model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
+        self.status_queue = RabbitMQClient(RABBITMQ_HOST, "status_queue")  # Assuming a separate status queue for status updates
+
+    def send_status(self, idempotency_key, status, details):
+        """Send status update to the status queue."""
+        status_message = {
+            "id": idempotency_key,
+            "status": status,
+            "details": details,
+            "timestamp": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        self.status_queue.send_message(status_message)
 
     def start(self):
         logger.info(f"Starting Embedding Processing Service")
@@ -44,13 +55,21 @@ class EmbeddingProcessingService:
     def process_message(self, message: Dict):
         local_path = None
         embedding_filename = None
+        idempotency_key = message.get('idempotency_key', str(uuid.uuid4()))  # Fallback to a new key if not present
+
         try:
             logger.info(f"Processing message: {message}")
+            
+            # Send "STARTED" status
+            self.send_status(idempotency_key, "STARTED", {
+                "operation": "embedding",
+                "document_name": message.get('document_name'),
+                "user": message.get('user', 'unknown')
+            })
 
             # Extract document information
             document_name = message['document_name']
             minio_path = message['minio_path']
-            idempotency_key = message.get('idempotency_key')
             original_filename = message.get('original_filename')
 
             # Download the document from MinIO
@@ -83,7 +102,7 @@ class EmbeddingProcessingService:
                 "original_filename": original_filename,
                 "document_name": document_name,
                 "minio_path": embedding_path,
-                "idempotency_key":idempotency_key,
+                "idempotency_key": idempotency_key,
                 "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             }
 
@@ -94,8 +113,21 @@ class EmbeddingProcessingService:
             logger.info(f"Embedding results saved to: {embedding_path}")
             logger.info(f"Result message sent to queue: {OUTPUT_QUEUE}")
 
+            # Send "COMPLETED" status
+            self.send_status(idempotency_key, "COMPLETED", {
+                "operation": "embedding",
+                "document_name": document_name,
+                "minio_path": embedding_path
+            })
+
         except Exception as e:
             logger.error(f"Error processing message: {str(e)}")
+            # Send "ERROR" status
+            self.send_status(idempotency_key, "ERROR", {
+                "operation": "embedding",
+                "document_name": message.get('document_name'),
+                "error": str(e)
+            })
 
         finally:
             # Clean up temporary files
@@ -108,6 +140,7 @@ class EmbeddingProcessingService:
         rabbitmq_health = self.input_queue.check_health() and self.output_queue.check_health()
         minio_health = self.minio_client.check_health()
         return rabbitmq_health and minio_health
+
 
 def main():
     embedding_service = EmbeddingProcessingService()

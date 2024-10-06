@@ -31,7 +31,7 @@ services:
     image: rabbitmq:3-management     # RabbitMQ with management console
     container_name: rabbitmq
     ports:
-      - "5672:5672"                  # RabbitMQ server port
+      - "5673:5672"                  # RabbitMQ server port
       - "15672:15672"                # RabbitMQ management console port
     environment:
       RABBITMQ_DEFAULT_USER: guest   # RabbitMQ username
