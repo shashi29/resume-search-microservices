@@ -2,3 +2,8 @@ fastapi
 uvicorn
 minio
 pika
+python-multipart
+python-jose
+passlib
+pydantic==1.10.9
+python-dotenv
