@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # RabbitMQ configuration
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
 INPUT_QUEUE = os.getenv("RABBITMQ_QUEUE")
-OUTPUT_QUEUE = os.getenv("OUTPUT_QUEUE", "ocr_results")
+OUTPUT_QUEUE = os.getenv("OUTPUT_QUEUE")
 
 # MinIO configuration
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
@@ -150,3 +150,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    
