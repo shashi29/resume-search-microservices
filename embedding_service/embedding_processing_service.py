@@ -1,16 +1,15 @@
 import os
 import json
-import uuid
 from datetime import datetime
 from typing import Dict
 import logging
 from dotenv import load_dotenv
-
-from rabbitmq_utils import RabbitMQClient
-from minio_utils import MinioClient
-from sentence_transformers import SentenceTransformer
 import zlib
 import numpy as np
+from sentence_transformers import SentenceTransformer
+from rabbitmq_utils import RabbitMQClient
+from s3_utils import S3Client  # Updated to use S3Client
+from urllib.parse import urlparse  # For parsing S3 URL
 
 # Load environment variables
 load_dotenv()
@@ -22,124 +21,150 @@ logger = logging.getLogger(__name__)
 # RabbitMQ configuration
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
 INPUT_QUEUE = os.getenv("RABBITMQ_QUEUE")
-OUTPUT_QUEUE = os.getenv("OUTPUT_QUEUE", "embedding_results")
+OUTPUT_QUEUE = os.getenv("OUTPUT_QUEUE")
+STATUS_QUEUE = os.getenv("STATUS_QUEUE")
 
-# MinIO configuration
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY")
-MINIO_BUCKET = os.getenv("BUCKET_NAME")
+# S3 configuration
+S3_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+S3_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 
 class EmbeddingProcessingService:
     def __init__(self):
         self.input_queue = RabbitMQClient(RABBITMQ_HOST, INPUT_QUEUE)
         self.output_queue = RabbitMQClient(RABBITMQ_HOST, OUTPUT_QUEUE)
-        self.minio_client = MinioClient(MINIO_ENDPOINT, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, secure=False)
+        self.s3_client = S3Client(S3_ACCESS_KEY, S3_SECRET_KEY)
         self.model = SentenceTransformer("mixedbread-ai/mxbai-embed-large-v1")
-        self.status_queue = RabbitMQClient(RABBITMQ_HOST, "status_queue")  # Assuming a separate status queue for status updates
+        self.status_queue = RabbitMQClient(RABBITMQ_HOST, STATUS_QUEUE)  # Assuming a separate status queue for status updates
 
-    def send_status(self, idempotency_key, status, details):
+    def send_status(self, status, details):
         """Send status update to the status queue."""
         status_message = {
-            "id": idempotency_key,
             "status": status,
             "details": details,
-            "timestamp": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            "timestamp": datetime.utcnow().isoformat()
         }
         self.status_queue.send_message(status_message)
 
     def start(self):
-        logger.info(f"Starting Embedding Processing Service")
+        logger.info("Starting Embedding Processing Service")
         self.input_queue.start_consumer(self.process_message)
 
+    def _generate_output_key(self, input_key: str, output_filename: str) -> str:
+        # Split the input key into path components
+        path_components = input_key.split('/')
+        
+        # Find the index of the last folder (parent of the file)
+        last_folder_index = len(path_components) - 2
+        
+        # Create the OCR folder at the same level as the last folder
+        path_components[last_folder_index] = "embedding"
+        
+        # Replace the filename with the output filename
+        path_components[-1] = output_filename
+        
+        # Join the path components back into a single string
+        return '/'.join(path_components[:-1]) + '/' + output_filename  # Ensure correct path structure
+        
     def process_message(self, message: Dict):
         local_path = None
-        embedding_filename = None
-        idempotency_key = message.get('idempotency_key', str(uuid.uuid4()))  # Fallback to a new key if not present
+        output_s3_path = None
 
         try:
             logger.info(f"Processing message: {message}")
-            
+
             # Send "STARTED" status
-            self.send_status(idempotency_key, "STARTED", {
+            self.send_status("STARTED", {
                 "operation": "embedding",
-                "document_name": message.get('document_name'),
-                "user": message.get('user', 'unknown')
+                "storage_path": message.get('storage_path'),
+                "metadata": message.get('metadata', {}),
+                "created_date": datetime.utcnow().isoformat()
             })
 
             # Extract document information
-            document_name = message['document_name']
-            minio_path = message['minio_path']
-            original_filename = message.get('original_filename')
+            s3_input_path = message['storage_path']
+            metadata = message.get('metadata', {})
 
-            # Download the document from MinIO
-            local_path = f"/tmp/{document_name}"
-            self.minio_client.download_file(MINIO_BUCKET, minio_path, local_path)
+            # Parse S3 path
+            parsed_input_path = urlparse(s3_input_path)
+            input_bucket = parsed_input_path.netloc
+            input_key = parsed_input_path.path.lstrip('/')
+
+            # Extract original filename and generate output filename
+            original_filename = os.path.basename(input_key)
+            filename_without_ext, _ = os.path.splitext(original_filename)
+            output_filename = f"{filename_without_ext}"
+            
+            # Generate local path for downloading the document
+            local_input_path = f"/tmp/{original_filename}"
+            local_output_path = os.path.join("/tmp", output_filename)
+
+            self.s3_client.download_file(input_bucket, input_key, local_input_path)
 
             # Read the document text
-            with open(local_path, 'r') as f:
+            with open(local_input_path, 'r') as f:
                 document_text = f.read()
 
             # Generate embeddings
             embedding = self.model.encode(document_text).tolist()
             compressed_embedding = zlib.compress(np.array(embedding, dtype=np.float32).tobytes())
 
-            # Save embeddings to MinIO
-            embedding_filename = f"{idempotency_key}.npz"
-            embedding_path = f"embeddings/{embedding_filename}"
+            # Prepare output S3 path for saving embeddings
+            output_key = self._generate_output_key(input_key, output_filename)
+            output_s3_path = f"s3://{input_bucket}/{output_key}" + ".npy"
 
+            # Save embeddings to S3
             # Check if the embedding result already exists
-            existing_objects = self.minio_client.list_objects(MINIO_BUCKET, prefix=embedding_path)
-            if existing_objects:
-                logger.info(f"Embedding result already exists for idempotency key: {idempotency_key}")
-            else:
-                np.savez_compressed(f"/tmp/{embedding_filename}", embeddings=compressed_embedding)
-                self.minio_client.upload_file(MINIO_BUCKET, embedding_path, f"/tmp/{embedding_filename}")
+            np.save(local_output_path, compressed_embedding)  # Save as .npy file
+            # Upload the result to S3
+            local_output_path = local_output_path + ".npy"
+            output_key = output_key + ".npy"
+            self.s3_client.upload_file(local_output_path, input_bucket, output_key)
 
             # Prepare result message
             result_message = {
                 "operation": "embedding",
-                "original_filename": original_filename,
-                "document_name": document_name,
-                "minio_path": embedding_path,
-                "idempotency_key": idempotency_key,
-                "created_date": datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                "storage_path": output_s3_path,
+                "metadata": metadata,
+                "created_date": datetime.utcnow().isoformat()
             }
 
             # Publish result to output queue
             self.output_queue.send_message(result_message)
 
-            logger.info(f"Processed document: {document_name}")
-            logger.info(f"Embedding results saved to: {embedding_path}")
+            logger.info(f"Processed document: {s3_input_path}")
+            logger.info(f"Embedding results saved to: {output_s3_path}")
             logger.info(f"Result message sent to queue: {OUTPUT_QUEUE}")
 
             # Send "COMPLETED" status
-            self.send_status(idempotency_key, "COMPLETED", {
+            self.send_status("COMPLETED", {
                 "operation": "embedding",
-                "document_name": document_name,
-                "minio_path": embedding_path
+                "storage_path": output_s3_path,
+                "metadata": metadata,
+                "created_date": datetime.utcnow().isoformat()
             })
 
         except Exception as e:
-            logger.error(f"Error processing message: {str(e)}")
+            logger.error(f"Error processing message: {str(e)}", exc_info=True)
             # Send "ERROR" status
-            self.send_status(idempotency_key, "ERROR", {
+            self.send_status("ERROR", {
                 "operation": "embedding",
-                "document_name": message.get('document_name'),
-                "error": str(e)
+                "storage_path": message.get('storage_path'),
+                "metadata": metadata,
+                "error": str(e),
+                "created_date": datetime.utcnow().isoformat()
             })
 
-        finally:
-            # Clean up temporary files
-            if local_path and os.path.exists(local_path):
-                os.remove(local_path)
-            if embedding_filename and os.path.exists(f"/tmp/{embedding_filename}"):
-                os.remove(f"/tmp/{embedding_filename}")
+        # finally:
+        #     # Clean up temporary files
+        #     if local_path and os.path.exists(local_path):
+        #         os.remove(local_path)
+        #     if output_s3_path and os.path.exists(output_key.split('/')[-1]):
+        #         os.remove(output_key.split('/')[-1])
 
     def check_health(self):
         rabbitmq_health = self.input_queue.check_health() and self.output_queue.check_health()
-        minio_health = self.minio_client.check_health()
-        return rabbitmq_health and minio_health
+        #s3_health = self.s3_client.check_health()  # Added health check for S3
+        return rabbitmq_health #and s3_health
 
 
 def main():
@@ -150,7 +175,7 @@ def main():
         logger.info("Health check passed. Starting Embedding Processing Service.")
         embedding_service.start()
     else:
-        logger.error("Health check failed. Please check your RabbitMQ and MinIO connections.")
+        logger.error("Health check failed. Please check your RabbitMQ and S3 connections.")
 
 if __name__ == "__main__":
     main()

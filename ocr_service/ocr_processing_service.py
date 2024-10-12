@@ -56,7 +56,8 @@ class OCRProcessingService:
             self.send_status(message_id, "STARTED", {
                 "operation": "ocr",
                 "storage_path": message.get('storage_path'),
-                "metadata": message.get('metadata', {})
+                "metadata": message.get('metadata', {}),
+                "created_date": datetime.utcnow().isoformat()
             })
 
             input_s3_path = message['storage_path']
@@ -76,7 +77,7 @@ class OCRProcessingService:
             local_input_path = os.path.join("/tmp", original_filename)
             local_output_path = os.path.join("/tmp", output_filename)
 
-            # Generate output S3 key
+            # Generate output S3 key (without 'actual-resumes')
             output_key = self._generate_output_key(input_key, output_filename)
             output_s3_path = f"s3://{input_bucket}/{output_key}"
 
@@ -88,7 +89,6 @@ class OCRProcessingService:
                 text = DocumentTextExtractor.extract_text_from_pdf(local_input_path)
             else:
                 text = DocumentTextExtractor.extract_text_from_doc(local_input_path)
-            print(text)
 
             # Save OCR results locally
             with open(local_output_path, "w") as f:
@@ -115,7 +115,8 @@ class OCRProcessingService:
             self.send_status(message_id, "COMPLETED", {
                 "operation": "ocr",
                 "storage_path": output_s3_path,
-                "metadata": metadata
+                "metadata": metadata,
+                "created_date": datetime.utcnow().isoformat()
             })
 
         except Exception as e:
@@ -124,7 +125,8 @@ class OCRProcessingService:
                 "operation": "ocr",
                 "storage_path": message.get('storage_path'),
                 "metadata": metadata,
-                "error": str(e)
+                "error": str(e),
+                "created_date": datetime.utcnow().isoformat()
             })
 
         finally:
@@ -139,13 +141,13 @@ class OCRProcessingService:
         last_folder_index = len(path_components) - 2
         
         # Create the OCR folder at the same level as the last folder
-        path_components.insert(last_folder_index, 'ocr')
+        path_components[last_folder_index] = "ocr"
         
         # Replace the filename with the output filename
         path_components[-1] = output_filename
         
         # Join the path components back into a single string
-        return '/'.join(path_components)
+        return '/'.join(path_components[:-1]) + '/' + output_filename  # Ensure correct path structure
 
     def _clean_up_temp_files(self, *file_paths):
         for file_path in file_paths:
@@ -158,8 +160,7 @@ class OCRProcessingService:
             self.output_queue.check_health(),
             self.status_queue.check_health()
         ])
-        #s3_health = self.s3_client.check_health()
-        return rabbitmq_health #and s3_health
+        return rabbitmq_health  # Assuming S3 health check is not required
 
 def main():
     ocr_service = OCRProcessingService()
