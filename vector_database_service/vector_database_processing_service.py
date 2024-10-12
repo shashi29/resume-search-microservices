@@ -4,7 +4,8 @@ import numpy as np
 import zlib
 import uuid
 import logging
-from datetime import datetime
+import threading  # For timing the 5-minute inactivity period
+from datetime import datetime, timedelta
 from typing import Dict
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient
@@ -32,12 +33,17 @@ S3_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
 # Qdrant URL configuration
 QDRANT_URL = os.getenv("QDRANT_URL")
 
+# Timeout for inactivity in seconds (5 minutes = 300 seconds)
+INACTIVITY_TIMEOUT = 300
+
 class QdrantInsertionService:
     def __init__(self):
         self.input_queue = RabbitMQClient(RABBITMQ_HOST, INPUT_QUEUE)
         self.status_queue = RabbitMQClient(RABBITMQ_HOST, STATUS_QUEUE)
         self.s3_client = S3Client(S3_ACCESS_KEY, S3_SECRET_KEY)
         self.qdrant_client = QdrantClient(url=QDRANT_URL)
+        self.last_message_time = datetime.utcnow()
+        self.inactivity_timer = None
 
     def send_status(self, status, details):
         """Send status update to the status queue."""
@@ -50,6 +56,7 @@ class QdrantInsertionService:
 
     def start(self):
         logger.info("Starting Qdrant Insertion Service")
+        self.reset_inactivity_timer()
         self.input_queue.start_consumer(self.process_message)
 
     def create_collection_if_not_exists(self, collection_name: str, vector_size: int):
@@ -97,6 +104,9 @@ class QdrantInsertionService:
     def process_message(self, message: Dict):
         try:
             logger.info(f"Processing message: {message}")
+
+            # Reset the inactivity timer each time a message is processed
+            self.reset_inactivity_timer()
 
             # Send "STARTED" status
             self.send_status("STARTED", {
@@ -175,6 +185,23 @@ class QdrantInsertionService:
             if local_input_path and os.path.exists(local_input_path):
                 os.remove(local_input_path)
 
+    def reset_inactivity_timer(self):
+        """Reset the inactivity timer and start a new countdown."""
+        if self.inactivity_timer:
+            self.inactivity_timer.cancel()  # Cancel the previous timer if running
+        
+        self.inactivity_timer = threading.Timer(INACTIVITY_TIMEOUT, self.handle_inactivity)
+        self.inactivity_timer.start()
+
+    def handle_inactivity(self):
+        """Handle inactivity by checking the queue for pending messages and processing them."""
+        logger.info("No new messages received for 5 minutes. Rechecking for pending messages in the queue.")
+        
+        # Re-check the queue for any pending messages and process them if they exist
+        if self.input_queue.get_message_count() > 0:
+            logger.info("Found pending messages. Restarting service to process them.")
+            self.start()  # Restart the service to consume pending messages
+
     def check_health(self):
         rabbitmq_health = self.input_queue.check_health() and self.status_queue.check_health()
         try:
@@ -182,7 +209,7 @@ class QdrantInsertionService:
             qdrant_health = True
         except:
             qdrant_health = False
-        return rabbitmq_health #and qdrant_health
+        return rabbitmq_health # and qdrant_health
 
 def main():
     qdrant_service = QdrantInsertionService()
