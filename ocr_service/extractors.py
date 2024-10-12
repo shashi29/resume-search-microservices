@@ -8,7 +8,7 @@ import numpy as np
 import pdfplumber
 import textract
 from pdf2image import convert_from_path
-import easyocr
+#import easyocr
 from pdfminer.pdfinterp import PDFResourceManager, PDFPageInterpreter
 from pdfminer.converter import TextConverter
 from pdfminer.layout import LAParams
@@ -91,9 +91,9 @@ class DocumentTextExtractor:
         """
         methods: List[Callable[[str], Optional[str]]] = [
             DocumentTextExtractor.extract_text_using_pdfplumber,
-            DocumentTextExtractor.extract_text_using_textract,
             DocumentTextExtractor.extract_text_using_pdfminer,
-            DocumentTextExtractor.extract_text_using_easyocr,
+            DocumentTextExtractor.extract_text_using_textract
+            # DocumentTextExtractor.extract_text_using_easyocr
         ]
         
         for method in methods:
@@ -244,8 +244,8 @@ if __name__ == "__main__":
     else:
         print("Failed to extract text from DOC/DOCX file.")
     
-    pdf_text = DocumentTextExtractor.extract_text_from_pdf(pdf_path)
-    if pdf_text:
-        print("Successfully extracted text from PDF file.")
-    else:
-        print("Failed to extract text from PDF file.")
+    # pdf_text = DocumentTextExtractor.extract_text_from_pdf(pdf_path)
+    # if pdf_text:
+    #     print("Successfully extracted text from PDF file.")
+    # else:
+    #     print("Failed to extract text from PDF file.")
