@@ -3,6 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+#Add folders
+qdrant_storage
+minio-data
+*.db
+
 # C extensions
 *.so
 

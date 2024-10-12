@@ -10,6 +10,7 @@ load_dotenv()
 # RabbitMQ configuration
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST")
 INPUT_QUEUE = os.getenv("RABBITMQ_QUEUE")
+COLLECTION_NAME = "create_collection"
 
 def submit_ocr_message(storage_path: str, metadata: Dict[str, Any] = None) -> bool:
     """
@@ -28,6 +29,7 @@ def submit_ocr_message(storage_path: str, metadata: Dict[str, Any] = None) -> bo
     message = {
         "storage_path": storage_path,
         "metadata": metadata,
+        "collection_name": COLLECTION_NAME,
         "operation": "ocr"
     }
 
@@ -68,7 +70,7 @@ if __name__ == "__main__":
     metadata = {
         "user_id": "12345",
         "document_type": "resume",
-        "submission_date": "2024-10-12"
+        "submission_date": "2024-10-12",
     }
 
     # Submit the message

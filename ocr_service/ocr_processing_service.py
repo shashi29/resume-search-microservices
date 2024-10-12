@@ -55,8 +55,10 @@ class OCRProcessingService:
             
             self.send_status(message_id, "STARTED", {
                 "operation": "ocr",
+                "resume_path" : message['storage_path'],
                 "storage_path": message.get('storage_path'),
                 "metadata": message.get('metadata', {}),
+                "collection_name": message.get("collection_name"),
                 "created_date": datetime.utcnow().isoformat()
             })
 
@@ -100,8 +102,10 @@ class OCRProcessingService:
             # Prepare result message
             result_message = {
                 "operation": "embedding",
+                "resume_path" : input_s3_path,
                 "storage_path": output_s3_path,
                 "metadata": metadata,
+                "collection_name": message.get("collection_name"),
                 "created_date": datetime.utcnow().isoformat()
             }
 
@@ -114,6 +118,7 @@ class OCRProcessingService:
 
             self.send_status(message_id, "COMPLETED", {
                 "operation": "ocr",
+                "resume_path" : input_s3_path,
                 "storage_path": output_s3_path,
                 "metadata": metadata,
                 "created_date": datetime.utcnow().isoformat()
@@ -123,8 +128,10 @@ class OCRProcessingService:
             logger.error(f"Error processing message: {str(e)}", exc_info=True)
             self.send_status(message_id, "ERROR", {
                 "operation": "ocr",
+                "resume_path" : input_s3_path,
                 "storage_path": message.get('storage_path'),
                 "metadata": metadata,
+                "collection_name": message.get("collection_name"),
                 "error": str(e),
                 "created_date": datetime.utcnow().isoformat()
             })

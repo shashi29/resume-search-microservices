@@ -75,8 +75,10 @@ class EmbeddingProcessingService:
             # Send "STARTED" status
             self.send_status("STARTED", {
                 "operation": "embedding",
+                "resume_path" : message.get('resume_path'),
                 "storage_path": message.get('storage_path'),
                 "metadata": message.get('metadata', {}),
+                "collection_name": message.get("collection_name"),
                 "created_date": datetime.utcnow().isoformat()
             })
 
@@ -123,8 +125,10 @@ class EmbeddingProcessingService:
             # Prepare result message
             result_message = {
                 "operation": "embedding",
+                "resume_path" : message.get('resume_path'),
                 "storage_path": output_s3_path,
                 "metadata": metadata,
+                "collection_name": message.get("collection_name"),
                 "created_date": datetime.utcnow().isoformat()
             }
 
@@ -138,8 +142,10 @@ class EmbeddingProcessingService:
             # Send "COMPLETED" status
             self.send_status("COMPLETED", {
                 "operation": "embedding",
+                "resume_path" : message.get('resume_path'),
                 "storage_path": output_s3_path,
                 "metadata": metadata,
+                "collection_name": message.get("collection_name"),
                 "created_date": datetime.utcnow().isoformat()
             })
 
@@ -148,18 +154,20 @@ class EmbeddingProcessingService:
             # Send "ERROR" status
             self.send_status("ERROR", {
                 "operation": "embedding",
+                "resume_path" : message.get('resume_path'),
                 "storage_path": message.get('storage_path'),
                 "metadata": metadata,
+                "collection_name": message.get("collection_name"),
                 "error": str(e),
                 "created_date": datetime.utcnow().isoformat()
             })
 
-        # finally:
-        #     # Clean up temporary files
-        #     if local_path and os.path.exists(local_path):
-        #         os.remove(local_path)
-        #     if output_s3_path and os.path.exists(output_key.split('/')[-1]):
-        #         os.remove(output_key.split('/')[-1])
+        finally:
+            # Clean up temporary files
+            if local_path and os.path.exists(local_path):
+                os.remove(local_path)
+            if output_s3_path and os.path.exists(output_key.split('/')[-1]):
+                os.remove(output_key.split('/')[-1])
 
     def check_health(self):
         rabbitmq_health = self.input_queue.check_health() and self.output_queue.check_health()
